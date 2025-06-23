@@ -2191,7 +2191,7 @@ class RatController:
                                     os.remove(path)
                                 except:
                                     pass
-                https://github.com/piskimiski/123753/tree/main
+                
                 # Информация о безопасном режиме
                 if self.safe_mode.get():
                     self.log("[!] ВНИМАНИЕ: Клиент собран в безопасном режиме", "warning")
