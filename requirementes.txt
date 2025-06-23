@@ -1,0 +1,1 @@
+pip install psutil browser-cookie3 requests mss pynput pillow opencv-python-headless numpy pycryptodome pyinstaller
